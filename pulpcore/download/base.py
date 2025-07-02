@@ -7,12 +7,14 @@ from concurrent.futures import ThreadPoolExecutor, ALL_COMPLETED
 import logging
 import os
 import tempfile
+import hashlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from pulpcore.app import pulp_hashlib
-from pulpcore.app.models import Artifact
+from pulpcore.app.models import Artifact, RemoteDownload
 from pulpcore.exceptions import (
     DigestValidationError,
     SizeValidationError,
@@ -115,7 +117,7 @@ class BaseDownloader:
                     ).format(self.url, Artifact.DIGEST_FIELDS, set(self.expected_digests))
                 )
 
-    def _ensure_writer_has_open_file(self):
+    async def _ensure_writer_has_open_file(self):
         """
         Create a temporary file on demand.
 
@@ -143,6 +145,13 @@ class BaseDownloader:
             self.path = self._writer.name
             self._digests = {n: pulp_hashlib.new(n) for n in Artifact.DIGEST_FIELDS}
             self._size = 0
+            try:
+                url_hash = hashlib.sha256(self.url.encode()).hexdigest()
+                rd = await RemoteDownload.objects.aget(download_id=url_hash)
+                rd.temp_path = self.path
+                await rd.asave()
+            except ObjectDoesNotExist:
+                pass
 
     async def handle_data(self, data):
         """
@@ -156,7 +165,7 @@ class BaseDownloader:
         Args:
             data (bytes): The data to be handled by the downloader.
         """
-        self._ensure_writer_has_open_file()
+        await self._ensure_writer_has_open_file()
         self._writer.write(data)
         self._record_size_and_digests_for_data(data)
 
@@ -175,7 +184,7 @@ class BaseDownloader:
                 doesn't match the size of the data passed to
                 :meth:`~pulpcore.plugin.download.BaseDownloader.handle_data`.
         """
-        self._ensure_writer_has_open_file()
+        await self._ensure_writer_has_open_file()
         self._writer.flush()
         os.fsync(self._writer.fileno())
         self._writer.close()

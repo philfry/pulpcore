@@ -5,6 +5,7 @@ import os
 import re
 import socket
 import struct
+import hashlib
 from gettext import gettext as _
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -52,6 +53,7 @@ from pulpcore.app.models import (  # noqa: E402: module level not at top of file
     Publication,
     Remote,
     RemoteArtifact,
+    RemoteDownload,
 )
 from pulpcore.app import mime_types  # noqa: E402: module level not at top of file
 from pulpcore.app.util import (  # noqa: E402: module level not at top of file
@@ -1304,6 +1306,16 @@ class Handler:
             if save_artifact and remote.policy != Remote.STREAMED:
                 await original_finalize()
 
+        url_hash = hashlib.sha256(remote_artifact.url.encode()).hexdigest()
+        rd_obj, created = await RemoteDownload.objects.aget_or_create(
+            download_id=url_hash
+        )
+        # XXX sich selbst in die queue eintragen, was könnte man als id nehmen?
+        # request._transport_peername -> ('::1', 38148, 0, 0)
+        if not created:
+            remote_artifact.url = 'tmp://'+url_hash
+            save_artifact = False
+
         downloader = remote.get_downloader(
             remote_artifact=remote_artifact,
             headers_ready_callback=handle_response_headers,
@@ -1348,6 +1360,8 @@ class Handler:
             # Try to add content to repository if present & supported
             if repository and repository.PULL_THROUGH_SUPPORTED:
                 await sync_to_async(repository.pull_through_add_content)(ca)
+        if created:
+            await rd_obj.adelete()
         await response.write_eof()
 
         if response.status == 404:
